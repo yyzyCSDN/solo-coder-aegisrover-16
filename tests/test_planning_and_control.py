@@ -11,7 +11,9 @@ from aegisrover.control.safety import (
 )
 from aegisrover.core.types import Pose2
 from aegisrover.planning.predict import (
-    CircleObstacle, inflate, minkowski_clearance, swept_path_conflict, time_to_collision,
+    CircleObstacle, ObstacleUncertainty, UncertainObstacle, confidence_scale,
+    conservative_clearance, inflate, inflate_uncertain, minkowski_clearance, safety_margin,
+    swept_path_conflict, time_to_collision,
 )
 from aegisrover.planning.search import TerrainGrid, astar, dijkstra
 from aegisrover.planning.trajectory import polyline_length, smooth, time_parameterize
@@ -138,6 +140,52 @@ def test_obstacle_inflation_and_clearance():
     assert clearance == pytest.approx(-0.5)
     blocked = swept_path_conflict([(0.0, 0.0), (4.0, 0.0)], bigger, robot_radius=0.0)
     assert blocked is not None
+
+
+def test_safety_margin_grows_with_uncertainty_and_confidence():
+    quiet = ObstacleUncertainty.isotropic(0.1)
+    noisy = ObstacleUncertainty.isotropic(0.5)
+    assert safety_margin(noisy) > safety_margin(quiet) > 0.0
+    assert safety_margin(quiet, confidence=0.999) > safety_margin(quiet, confidence=0.9)
+    assert safety_margin(ObstacleUncertainty(0.0, 0.0)) == 0.0
+    # k(p) is the 2D chi-square quantile: sqrt(-2 ln(1 - p)).
+    assert confidence_scale(0.99) == pytest.approx(math.sqrt(-2.0 * math.log(0.01)))
+
+
+def test_safety_margin_uses_worst_direction_and_grows_over_horizon():
+    flat = ObstacleUncertainty(var_x=0.09, var_y=0.01)  # sigma_max = 0.3 along x
+    assert safety_margin(flat, confidence=0.99) == pytest.approx(confidence_scale(0.99) * 0.3)
+    drifting = ObstacleUncertainty(0.0, 0.0, velocity_std=0.2)
+    assert safety_margin(drifting, horizon=5.0) == pytest.approx(confidence_scale(0.99) * 1.0)
+    assert safety_margin(drifting, horizon=5.0) > safety_margin(drifting, horizon=0.0)
+    sized = ObstacleUncertainty(0.0, 0.0, radius_std=0.1)
+    assert safety_margin(sized, confidence=0.99) == pytest.approx(confidence_scale(0.99) * 0.1)
+
+
+def test_uncertain_obstacle_alarms_earlier_than_nominal_circle():
+    observed = UncertainObstacle(CircleObstacle(3.0, 1.2, 0.5), ObstacleUncertainty.isotropic(0.5))
+    path = [(0.0, 0.0), (5.0, 0.0)]
+    # The nominal circle clears the path, the uncertainty-inflated one does not.
+    assert swept_path_conflict(path, [observed.obstacle], robot_radius=0.4) is None
+    inflated = inflate_uncertain([observed], confidence=0.99)
+    assert inflated[0].radius == pytest.approx(0.5 + observed.margin(confidence=0.99))
+    assert swept_path_conflict(path, inflated, robot_radius=0.4) is not None
+    nominal = minkowski_clearance(path, [observed.obstacle])
+    conservative = conservative_clearance(path, [observed], confidence=0.99)
+    assert nominal - conservative == pytest.approx(observed.margin(confidence=0.99))
+
+
+def test_obstacle_uncertainty_validation():
+    with pytest.raises(ValueError):
+        ObstacleUncertainty(var_x=-1.0, var_y=0.0)
+    with pytest.raises(ValueError):
+        ObstacleUncertainty(var_x=0.01, var_y=0.01, cov_xy=0.5)  # not PSD
+    with pytest.raises(ValueError):
+        ObstacleUncertainty(0.0, 0.0, radius_std=-0.1)
+    with pytest.raises(ValueError):
+        confidence_scale(1.0)
+    with pytest.raises(ValueError):
+        safety_margin(ObstacleUncertainty(0.0, 0.0), horizon=-1.0)
 
 
 # ------------------------------------------------------------------------------ control
