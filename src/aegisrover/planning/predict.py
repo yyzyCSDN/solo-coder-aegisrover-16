@@ -24,6 +24,11 @@ class CircleObstacle:
     radius: float
     vx: float = 0.0
     vy: float = 0.0
+    # 2x2 covariance of the measured centre, in the same frame as x/y.
+    # ``None`` means the centre is treated as exact.
+    covariance: tuple[tuple[float, float], tuple[float, float]] | None = None
+    # Standard deviation of the physical radius (size/segmentation uncertainty).
+    radius_sigma: float = 0.0
 
     def at(self, t: float) -> Point:
         return (self.x + self.vx * t, self.y + self.vy * t)
